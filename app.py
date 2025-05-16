@@ -28,16 +28,30 @@ class ECGData:
             self.data[lead] = np.sin(x * freq + phase) * amplitude
             
             # Add some QRS complexes
-            for i in range(5, 500, 50):
+            for i in range(15, 500, 50):  # Start at 15 to ensure enough space for P wave
                 if i+15 < 500:
-                    # P wave
-                    self.data[lead][i-10:i] += np.sin(np.linspace(0, np.pi, 10)) * 0.2
+                    # P wave - ensure the slice is within bounds
+                    if i >= 10:  # Make sure we have enough space for P wave
+                        p_wave = np.sin(np.linspace(0, np.pi, 10)) * 0.2
+                        self.data[lead][i-10:i] += p_wave
+                    
                     # QRS complex
                     self.data[lead][i] -= 0.2  # Q wave
-                    self.data[lead][i+1:i+3] += np.linspace(0, 2, 2) * (1 + (lead_num % 3) * 0.5)  # R wave
-                    self.data[lead][i+3:i+5] -= np.linspace(0.5, 0, 2) * 0.3  # S wave
-                    # T wave
-                    self.data[lead][i+8:i+15] += np.sin(np.linspace(0, np.pi, 7)) * 0.3
+                    
+                    # R wave - ensure indices are in bounds
+                    if i+3 < 500:
+                        r_wave = np.linspace(0, 2, 2) * (1 + (lead_num % 3) * 0.5)
+                        self.data[lead][i+1:i+3] += r_wave
+                    
+                    # S wave - ensure indices are in bounds
+                    if i+5 < 500:
+                        s_wave = np.linspace(0.5, 0, 2) * 0.3
+                        self.data[lead][i+3:i+5] -= s_wave
+                    
+                    # T wave - ensure indices are in bounds
+                    if i+15 < 500:
+                        t_wave = np.sin(np.linspace(0, np.pi, 7)) * 0.3
+                        self.data[lead][i+8:i+15] += t_wave
             
             # Add some random noise
             self.data[lead] += np.random.normal(0, 0.03, 500)
@@ -102,7 +116,7 @@ ecg_data = ECGData()
 @app.route('/')
 def index():
     """Render the main page"""
-    return render_template('index.html')
+    return get_index_template()
 
 @app.route('/update_ecg')
 def update_ecg():
