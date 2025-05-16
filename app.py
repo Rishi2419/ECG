@@ -1,148 +1,226 @@
-import sys
+import io
+import base64
 import numpy as np
-import threading
-import time
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QGridLayout, QLabel)
-from PyQt6.QtCore import QTimer, pyqtSignal, Qt
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+import matplotlib
+matplotlib.use('Agg')  # Set the backend to Agg for server-side rendering
+import matplotlib.pyplot as plt
+from flask import Flask, render_template, jsonify
 from matplotlib.figure import Figure
 
+app = Flask(__name__)
 
-class ECGCanvas(FigureCanvas):
-    """Canvas for displaying a single ECG lead"""
-    def __init__(self, lead_number, width=3, height=2, dpi=100):
-        self.fig = Figure(figsize=(width, height), dpi=dpi)
-        self.axes = self.fig.add_subplot(111)
-        self.lead_number = lead_number
-        
-        super(ECGCanvas, self).__init__(self.fig)
-        
-        # Initialize the data
-        self.data = np.zeros(500)
-        
-        # Configure the plot
-        self.axes.set_title(f"Lead {lead_number}")
-        self.axes.set_ylim(-2, 2)
-        self.axes.set_yticks([])
-        self.axes.set_xticks([])
-        self.line, = self.axes.plot(np.arange(len(self.data)), self.data, 'g-', linewidth=0.8)
-        
-        self.fig.tight_layout()
-        
-    def update_data(self, new_data):
-        """Update the plot with new data"""
-        self.data = new_data
-        self.line.set_ydata(self.data)
-        self.draw()
-
-
-class ECGMonitor(QMainWindow):
-    """Main application window for the ECG monitor"""
-    data_updated = pyqtSignal(dict)
-    
+class ECGData:
+    """Class to generate and store ECG data"""
     def __init__(self):
-        super().__init__()
-        
-        self.setWindowTitle("12-Lead ECG Monitor")
-        self.setGeometry(100, 100, 1200, 800)
-        
-        # Create the central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        # Create the main layout
-        main_layout = QVBoxLayout(central_widget)
-        
-        # Add a title label
-        title_label = QLabel("12-Lead ECG Monitor")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setStyleSheet("font-size: 24px; font-weight: bold; margin-bottom: 10px;")
-        main_layout.addWidget(title_label)
-        
-        # Create a grid layout for the ECG plots
-        grid_layout = QGridLayout()
-        main_layout.addLayout(grid_layout)
-        
-        # Initialize the ECG canvases
-        self.ecg_canvases = {}
-        for i in range(1, 13):
-            row = (i - 1) // 2
-            col = (i - 1) % 2
-            canvas = ECGCanvas(i)
-            grid_layout.addWidget(canvas, row, col)
-            self.ecg_canvases[f"lead_{i}"] = canvas
-        
-        # Initialize the ECG data
-        self.ecg_data = {f"lead_{i}": np.zeros(500) for i in range(1, 13)}
-        self.data_lock = threading.Lock()
-        
-        # Connect the data updated signal
-        self.data_updated.connect(self.update_plots)
-        
-        # Start the data generation thread
-        self.running = True
-        self.data_thread = threading.Thread(target=self.generate_ecg_data, daemon=True)
-        self.data_thread.start()
-        
-        # Set up the timer for updating the UI
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.request_update)
-        self.timer.start(100)  # Update every 100ms
+        self.data = {f"lead_{i}": np.zeros(500) for i in range(1, 13)}
+        self.init_data()
     
-    def generate_ecg_data(self):
-        """Generate synthetic ECG data for 12 leads"""
-        while self.running:
-            with self.data_lock:
-                for lead in self.ecg_data:
-                    # Shift the data to the left
-                    self.ecg_data[lead] = np.roll(self.ecg_data[lead], -5)
-                    
-                    # Generate new data points for the right side
-                    # Using different patterns for different leads to simulate real ECG
-                    lead_num = int(lead.split('_')[1])
-                    freq = 0.4 + (lead_num * 0.05)  # Different frequency for each lead
-                    amplitude = 0.5 + (lead_num * 0.1) % 1  # Different amplitude
-                    phase = lead_num * np.pi / 6  # Different phase
-                    
-                    # Generate a QRS complex like pattern with some noise
-                    x = np.linspace(0, 2*np.pi, 5)
-                    new_points = np.sin(x * freq + phase) * amplitude
-                    
-                    # Add a spike to simulate R wave (higher for some leads)
-                    if lead_num % 3 == 0:
-                        new_points[2] += 1.5
-                    
-                    # Add some random noise
-                    new_points += np.random.normal(0, 0.05, 5)
-                    
-                    # Add the new points
-                    self.ecg_data[lead][-5:] = new_points
+    def init_data(self):
+        """Initialize data with some patterns"""
+        for lead in self.data:
+            lead_num = int(lead.split('_')[1])
+            freq = 0.4 + (lead_num * 0.05)
+            amplitude = 0.5 + (lead_num * 0.1) % 1
+            phase = lead_num * np.pi / 6
             
-            # Update at a regular interval
-            time.sleep(0.1)
+            # Create a sinusoidal pattern with some noise
+            x = np.linspace(0, 10*np.pi, 500)
+            self.data[lead] = np.sin(x * freq + phase) * amplitude
+            
+            # Add some QRS complexes
+            for i in range(5, 500, 50):
+                if i+15 < 500:
+                    # P wave
+                    self.data[lead][i-10:i] += np.sin(np.linspace(0, np.pi, 10)) * 0.2
+                    # QRS complex
+                    self.data[lead][i] -= 0.2  # Q wave
+                    self.data[lead][i+1:i+3] += np.linspace(0, 2, 2) * (1 + (lead_num % 3) * 0.5)  # R wave
+                    self.data[lead][i+3:i+5] -= np.linspace(0.5, 0, 2) * 0.3  # S wave
+                    # T wave
+                    self.data[lead][i+8:i+15] += np.sin(np.linspace(0, np.pi, 7)) * 0.3
+            
+            # Add some random noise
+            self.data[lead] += np.random.normal(0, 0.03, 500)
     
-    def request_update(self):
-        """Request an update of the plots"""
-        with self.data_lock:
-            data_copy = self.ecg_data.copy()
-        self.data_updated.emit(data_copy)
-    
-    def update_plots(self, data):
-        """Update all ECG plots with new data"""
-        for lead, canvas in self.ecg_canvases.items():
-            canvas.update_data(data[lead])
-    
-    def closeEvent(self, event):
-        """Handle window close event"""
-        self.running = False
-        if self.data_thread.is_alive():
-            self.data_thread.join(1.0)  # Wait for the thread to finish
-        event.accept()
+    def update_data(self):
+        """Update ECG data by shifting and generating new points"""
+        for lead in self.data:
+            # Shift data to the left
+            self.data[lead] = np.roll(self.data[lead], -5)
+            
+            # Generate new points
+            lead_num = int(lead.split('_')[1])
+            freq = 0.4 + (lead_num * 0.05)
+            amplitude = 0.5 + (lead_num * 0.1) % 1
+            phase = lead_num * np.pi / 6
+            
+            # Generate new points with patterns
+            x = np.linspace(0, 2*np.pi, 5)
+            new_points = np.sin(x * freq + phase) * amplitude
+            
+            # Add a spike for R wave occasionally
+            if np.random.random() < 0.1:
+                new_points[2] += 1.5 * (1 + (lead_num % 3) * 0.5)
+            
+            # Add noise
+            new_points += np.random.normal(0, 0.05, 5)
+            
+            # Update the data
+            self.data[lead][-5:] = new_points
+        
+        return self.data
+
+    def get_plot_base64(self, lead_num):
+        """Generate a base64 image for a specific lead"""
+        fig = Figure(figsize=(5, 2))
+        ax = fig.add_subplot(111)
+        
+        lead_key = f"lead_{lead_num}"
+        ax.plot(np.arange(len(self.data[lead_key])), self.data[lead_key], 'g-', linewidth=0.8)
+        
+        ax.set_title(f"Lead {lead_num}")
+        ax.set_ylim(-2, 2)
+        ax.set_yticks([])
+        ax.set_xticks([])
+        fig.tight_layout()
+        
+        # Save the figure to a PNG in memory
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png')
+        buf.seek(0)
+        
+        # Encode the PNG as base64
+        image_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        plt.close(fig)
+        
+        return image_base64
 
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = ECGMonitor()
-    window.show()
-    sys.exit(app.exec())
+# Initialize ECG data
+ecg_data = ECGData()
+
+@app.route('/')
+def index():
+    """Render the main page"""
+    return render_template('index.html')
+
+@app.route('/update_ecg')
+def update_ecg():
+    """API endpoint to update ECG data and return new plots"""
+    # Update the ECG data
+    ecg_data.update_data()
+    
+    # Generate plots for all leads
+    plots = {}
+    for i in range(1, 13):
+        plots[f"lead_{i}"] = ecg_data.get_plot_base64(i)
+    
+    return jsonify(plots)
+
+# Create a simple template for the index page
+@app.route('/templates/index.html')
+def get_index_template():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>12-Lead ECG Monitor</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 20px;
+            }
+            h1 {
+                text-align: center;
+                margin-bottom: 20px;
+            }
+            .ecg-grid {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 15px;
+            }
+            .ecg-lead {
+                border: 1px solid #ccc;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            .ecg-lead img {
+                width: 100%;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>12-Lead ECG Monitor</h1>
+        <div class="ecg-grid">
+            <div class="ecg-lead">
+                <h3>Lead 1</h3>
+                <img id="lead_1" src="/update_ecg" alt="Lead 1">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 2</h3>
+                <img id="lead_2" src="/update_ecg" alt="Lead 2">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 3</h3>
+                <img id="lead_3" src="/update_ecg" alt="Lead 3">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 4</h3>
+                <img id="lead_4" src="/update_ecg" alt="Lead 4">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 5</h3>
+                <img id="lead_5" src="/update_ecg" alt="Lead 5">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 6</h3>
+                <img id="lead_6" src="/update_ecg" alt="Lead 6">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 7</h3>
+                <img id="lead_7" src="/update_ecg" alt="Lead 7">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 8</h3>
+                <img id="lead_8" src="/update_ecg" alt="Lead 8">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 9</h3>
+                <img id="lead_9" src="/update_ecg" alt="Lead 9">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 10</h3>
+                <img id="lead_10" src="/update_ecg" alt="Lead 10">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 11</h3>
+                <img id="lead_11" src="/update_ecg" alt="Lead 11">
+            </div>
+            <div class="ecg-lead">
+                <h3>Lead 12</h3>
+                <img id="lead_12" src="/update_ecg" alt="Lead 12">
+            </div>
+        </div>
+
+        <script>
+            function updateECG() {
+                fetch('/update_ecg')
+                    .then(response => response.json())
+                    .then(data => {
+                        for (let i = 1; i <= 12; i++) {
+                            const imgElement = document.getElementById(`lead_${i}`);
+                            imgElement.src = `data:image/png;base64,${data[`lead_${i}`]}`;
+                        }
+                    })
+                    .catch(error => console.error('Error updating ECG:', error));
+            }
+
+            // Update every 500ms
+            setInterval(updateECG, 500);
+        </script>
+    </body>
+    </html>
+    """
+
+if __name__ == '__main__':
+    app.run(debug=True)
